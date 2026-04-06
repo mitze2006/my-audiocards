@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AudioCards Pro</title>
+    <script src="https://unpkg.com/dexie/dist/dexie.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .btn-rec { transition: all 0.2s ease; }
+        .btn-rec:active { transform: scale(0.95); }
+        .loading-spinner { border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; width: 20px; height: 20px; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-gray-900 text-white font-sans overflow-hidden">
+
+    <div id="app" class="h-screen flex flex-col">
+        <header class="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-800">
+            <h1 class="text-xl font-bold">AudioCards</h1>
+            <div class="flex gap-1">
+                <button onclick="switchMode('input')" id="nav-input" class="px-3 py-1 rounded text-sm bg-blue-600">Input</button>
+                <button onclick="switchMode('study')" id="nav-study" class="px-3 py-1 rounded text-sm bg-gray-700">Study</button>
+                <button onclick="switchMode('storage')" id="nav-storage" class="px-3 py-1 rounded text-sm bg-gray-700">Storage</button>
+            </div>
+        </header>
+
+        <main id="input-mode" class="flex-1 flex flex-col p-6 items-center justify-center gap-8">
+            <div class="w-full max-w-sm">
+                <label class="block text-sm mb-2 text-gray-400">Tag (Required)</label>
+                <input type="text" id="tag-input" list="tag-list" class="w-full p-3 rounded bg-gray-800 border border-gray-600 outline-none" placeholder="e.g. Spanish Verbs">
+                <datalist id="tag-list"></datalist>
+            </div>
+            <button id="rec-btn" onclick="handleRecordClick()" class="w-48 h-48 rounded-full bg-green-600 text-xl font-bold shadow-lg flex flex-col items-center justify-center gap-2">
+                <span>Start Rec Q</span>
+            </button>
+            <button onclick="handleDelete()" class="px-8 py-2 bg-gray-700 text-red-400 rounded-lg font-semibold uppercase text-sm border border-red-900/30">Delete Current</button>
+        </main>
+
+        <main id="study-mode" class="hidden flex-1 flex flex-col p-6 items-center gap-6 overflow-y-auto">
+            <div class="w-full max-w-sm space-y-4">
+                <select id="study-tag-filter" class="w-full p-3 rounded bg-gray-800 border border-gray-600 outline-none"></select>
+                <div class="flex gap-4">
+                    <select id="study-order" class="flex-1 p-3 rounded bg-gray-800 border border-gray-600">
+                        <option value="chrono">Newest First</option>
+                        <option value="random">Random Order</option>
+                    </select>
+                    <div class="flex-1 flex items-center gap-2 bg-gray-800 p-3 rounded border border-gray-600">
+                        <span class="text-xs text-gray-400">Auto:</span>
+                        <input type="number" id="auto-delay" class="w-12 bg-transparent text-center outline-none" value="3">
+                        <span class="text-xs text-gray-400">sec</span>
+                    </div>
+                </div>
+            </div>
+            <div class="flex-1 flex flex-col items-center justify-center text-center gap-6">
+                <div id="status-display" class="text-gray-400 uppercase tracking-widest text-sm">Ready</div>
+                <div id="card-count" class="text-xs text-gray-500">0 Cards Loaded</div>
+                <button id="study-play-btn" onclick="toggleStudy()" class="w-32 h-32 rounded-full bg-blue-600 text-lg font-bold shadow-xl">START</button>
+            </div>
+        </main>
+
+        <main id="storage-mode" class="hidden flex-1 flex flex-col p-8 gap-6">
+            <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                <h2 class="text-lg font-bold mb-2">Backup Library</h2>
+                <p class="text-sm text-gray-400 mb-4">Download your entire library as a single file. Useful for moving to a new phone.</p>
+                <button onclick="exportBackup()" id="export-btn" class="w-full py-3 bg-blue-600 rounded font-bold flex justify-center items-center gap-2">
+                    Export Backup (.json)
+                </button>
+            </div>
+
+            <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                <h2 class="text-lg font-bold mb-2">Restore Library</h2>
+                <p class="text-sm text-gray-400 mb-4">Warning: This will merge the backup with your existing cards.</p>
+                <input type="file" id="import-file" class="hidden" accept=".json" onchange="importBackup(event)">
+                <button onclick="document.getElementById('import-file').click()" id="import-btn" class="w-full py-3 bg-gray-700 border border-gray-600 rounded font-bold">
+                    Select Backup File
+                </button>
+            </div>
+            <div id="storage-status" class="text-center text-sm text-blue-400"></div>
+        </main>
+    </div>
+
+    <script>
+        const db = new Dexie("AudioFlashcardsDB");
+        db.version(1).stores({ cards: '++id, tag, timestamp' });
+
+        let state = 'IDLE', mediaRecorder = null, audioChunks = [], currentQBlob = null;
+        let studyQueue = [], studyIndex = 0, isStudying = false;
+
+        // --- CORE LOGIC ---
+        async function handleRecordClick() {
+            const tag = document.getElementById('tag-input').value.trim();
+            if (!tag) return alert("Please enter a tag first!");
+
+            if (state === 'IDLE') {
+                await startRecording(); state = 'REC_Q'; updateBtn('Stop Rec Q', 'bg-red-600');
+            } else if (state === 'REC_Q') {
+                currentQBlob = await stopRecording(); state = 'WAIT_A'; updateBtn('Start Rec A', 'bg-green-600');
+            } else if (state === 'WAIT_A') {
+                await startRecording(); state = 'REC_A'; updateBtn('Stop Rec A', 'bg-red-600');
+            } else if (state === 'REC_A') {
+                const aBlob = await stopRecording();
+                await db.cards.add({ tag, q_blob: currentQBlob, a_blob: aBlob, timestamp: Date.now() });
+                state = 'IDLE'; updateBtn('Start Rec Q', 'bg-green-600'); currentQBlob = null; refreshTags();
+            }
+        }
+
+        async function startRecording() {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+            mediaRecorder.start();
+        }
+
+        function stopRecording() {
+            return new Promise(resolve => {
+                mediaRecorder.onstop = () => resolve(new Blob(audioChunks, { type: 'audio/webm' }));
+                mediaRecorder.stop();
+            });
+        }
+
+        // --- BACKUP & RESTORE FUNCTIONS ---
+        async function exportBackup() {
+            const btn = document.getElementById('export-btn');
+            btn.disabled = true; btn.innerHTML = '<div class="loading-spinner"></div> Processing...';
+            
+            try {
+                const allCards = await db.cards.toArray();
+                const backupData = [];
+
+                for (const card of allCards) {
+                    backupData.push({
+                        tag: card.tag,
+                        timestamp: card.timestamp,
+                        q_base64: await blobToBase64(card.q_blob),
+                        a_base64: await blobToBase64(card.a_blob)
+                    });
+                }
+
+                const blob = new Blob([JSON.stringify(backupData)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `audiocards-backup-${new Date().toISOString().slice(0,10)}.json`;
+                a.click();
+            } catch (e) {
+                alert("Export failed: " + e.message);
+            } finally {
+                btn.disabled = false; btn.innerText = 'Export Backup (.json)';
+            }
+        }
+
+        async function importBackup(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const btn = document.getElementById('import-btn');
+            const status = document.getElementById('storage-status');
+            btn.disabled = true; status.innerText = "Importing cards... please wait.";
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    for (const item of data) {
+                        await db.cards.add({
+                            tag: item.tag,
+                            timestamp: item.timestamp,
+                            q_blob: base64ToBlob(item.q_base64),
+                            a_blob: base64ToBlob(item.a_base64)
+                        });
+                    }
+                    alert(`Successfully imported ${data.length} cards!`);
+                    refreshTags();
+                } catch (err) {
+                    alert("Import failed. Ensure the file is a valid AudioCards backup.");
+                } finally {
+                    btn.disabled = false; status.innerText = "";
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // Helper: Convert Blob to Base64 string
+        function blobToBase64(blob) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.readAsDataURL(blob);
+            });
+        }
+
+        // Helper: Convert Base64 string back to Blob
+        function base64ToBlob(base64) {
+            const parts = base64.split(';base64,');
+            const contentType = parts[0].split(':')[1];
+            const raw = window.atob(parts[1]);
+            const uInt8Array = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; ++i) uInt8Array[i] = raw.charCodeAt(i);
+            return new Blob([uInt8Array], { type: contentType });
+        }
+
+        // --- UI & STUDY HELPERS ---
+        function updateBtn(t, c) { 
+            const b = document.getElementById('rec-btn');
+            b.innerText = t; b.className = `w-48 h-48 rounded-full text-xl font-bold shadow-lg flex flex-col items-center justify-center gap-2 ${c} btn-rec`; 
+        }
+
+        function toggleStudy() {
+            if (isStudying) { isStudying = false; document.getElementById('study-play-btn').innerText = "START"; }
+            else { startStudySession(); }
+        }
+
+        async function startStudySession() {
+            const filter = document.getElementById('study-tag-filter').value;
+            const order = document.getElementById('study-order').value;
+            studyQueue = (filter === 'all') ? await db.cards.toArray() : await db.cards.where('tag').equals(filter).toArray();
+            if (studyQueue.length === 0) return alert("No cards!");
+            if (order === 'random') studyQueue.sort(() => Math.random() - 0.5);
+            else studyQueue.sort((a, b) => b.timestamp - a.timestamp);
+            studyIndex = 0; isStudying = true;
+            document.getElementById('study-play-btn').innerText = "STOP";
+            playNextCard();
+        }
+
+        async function playNextCard() {
+            if (studyIndex >= studyQueue.length || !isStudying) {
+                isStudying = false; document.getElementById('study-play-btn').innerText = "START";
+                document.getElementById('status-display').innerText = "Finished!"; return;
+            }
+            const card = studyQueue[studyIndex];
+            const delay = parseInt(document.getElementById('auto-delay').value) * 1000;
+            document.getElementById('status-display').innerText = "Question...";
+            await playAudio(card.q_blob);
+            if (!isStudying) return;
+            document.getElementById('status-display').innerText = "Waiting...";
+            await new Promise(r => setTimeout(r, delay));
+            if (!isStudying) return;
+            document.getElementById('status-display').innerText = "Answer!";
+            await playAudio(card.a_blob);
+            studyIndex++; playNextCard();
+        }
+
+        function playAudio(blob) {
+            return new Promise(resolve => {
+                const url = URL.createObjectURL(blob); const audio = new Audio(url);
+                audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+                audio.play().catch(e => { console.error(e); resolve(); });
+            });
+        }
+
+        function switchMode(mode) {
+            ['input', 'study', 'storage'].forEach(m => {
+                document.getElementById(`${m}-mode`).classList.toggle('hidden', m !== mode);
+                document.getElementById(`nav-${m}`).className = `px-3 py-1 rounded text-sm ${m === mode ? 'bg-blue-600' : 'bg-gray-700'}`;
+            });
+            if (mode === 'study' || mode === 'storage') refreshTags();
+        }
+
+        async function refreshTags() {
+            const cards = await db.cards.toArray();
+            const tags = [...new Set(cards.map(c => c.tag))];
+            document.getElementById('tag-list').innerHTML = tags.map(t => `<option value="${t}">`).join('');
+            document.getElementById('study-tag-filter').innerHTML = `<option value="all">All Tags (${cards.length})</option>` + tags.map(t => `<option value="${t}">${t}</option>`).join('');
+            document.getElementById('card-count').innerText = `${cards.length} Cards in Library`;
+        }
+        
+        function handleDelete() { currentQBlob = null; state = 'IDLE'; updateBtn('Start Rec Q', 'bg-green-600'); }
+
+        refreshTags();
+    </script>
+</body>
+</html>
