@@ -42,7 +42,7 @@
                 <select id="study-tag-filter" class="w-full p-3 rounded bg-gray-800 border border-gray-600 outline-none"></select>
                 <div class="flex gap-4">
                     <select id="study-order" class="flex-1 p-3 rounded bg-gray-800 border border-gray-600">
-                        <option value="chrono">Newest First</option>
+                        <option value="chrono">Oldest First</option>
                         <option value="random">Random Order</option>
                     </select>
                     <div class="flex-1 flex items-center gap-2 bg-gray-800 p-3 rounded border border-gray-600">
@@ -217,8 +217,12 @@
             const order = document.getElementById('study-order').value;
             studyQueue = (filter === 'all') ? await db.cards.toArray() : await db.cards.where('tag').equals(filter).toArray();
             if (studyQueue.length === 0) return alert("No cards!");
-            if (order === 'random') studyQueue.sort(() => Math.random() - 0.5);
-            else studyQueue.sort((a, b) => b.timestamp - a.timestamp);
+            if (order === 'random') {
+    studyQueue.sort(() => Math.random() - 0.5);
+} else {
+    // Sorts by timestamp: Smallest (Oldest) to Largest (Newest)
+    studyQueue.sort((a, b) => a.timestamp - b.timestamp); 
+}
             studyIndex = 0; isStudying = true;
             document.getElementById('study-play-btn').innerText = "STOP";
             playNextCard();
